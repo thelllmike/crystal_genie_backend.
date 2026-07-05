@@ -50,7 +50,10 @@ def get_crystal_info(class_name: str) -> dict:
         "star_sign": row.get("star_sign") or "",
         "chakras": row.get("chakras") or "",
     }
-    _crystal_cache[key] = info
+    # Only cache real hits, so a crystal added to the DB later is picked up
+    # without needing a server restart.
+    if info["description"] or info["headline"]:
+        _crystal_cache[key] = info
     return info
 
 
