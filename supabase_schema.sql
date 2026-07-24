@@ -20,12 +20,14 @@ create table if not exists detections (
   detected_at timestamptz not null default now()
 );
 
--- The backend authenticates with the anon key, so give that role exactly
--- what it needs: read the catalog, append to history.
+-- The backend authenticates with the anon key, and the app reads the catalog
+-- as a signed-in user, so BOTH roles need select. Granting only to anon makes
+-- the crystal library come back empty for every logged-in user.
 alter table crystals enable row level security;
 drop policy if exists "anon can read crystals" on crystals;
-create policy "anon can read crystals"
-  on crystals for select to anon using (true);
+drop policy if exists "anyone can read crystals" on crystals;
+create policy "anyone can read crystals"
+  on crystals for select to anon, authenticated using (true);
 
 alter table detections enable row level security;
 drop policy if exists "anon can log detections" on detections;
