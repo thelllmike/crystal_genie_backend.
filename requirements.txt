@@ -5,3 +5,4 @@ ultralytics
 pillow
 supabase
 python-dotenv
+stripe

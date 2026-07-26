@@ -5,8 +5,9 @@
 import io
 import os
 
+import stripe
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from PIL import Image
 from supabase import Client, create_client
 from ultralytics import YOLO
@@ -17,6 +18,12 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")
 CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.25"))
+
+# Stripe. Kept optional so detection still runs without payment configured.
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_CURRENCY = os.getenv("STRIPE_CURRENCY", "usd")
+stripe.api_key = STRIPE_SECRET_KEY
 
 app = FastAPI(title="Crystal Genie API")
 model = YOLO(MODEL_PATH)
@@ -70,6 +77,73 @@ def save_detection(class_name: str, confidence: float) -> None:
 @app.get("/health")
 def health():
     return {"status": "ok", "model": os.path.basename(MODEL_PATH)}
+
+
+def _cart_total_for_token(token: str) -> tuple[str, float]:
+    """Validate the Supabase JWT and return (user_id, cart total in dollars).
+
+    The amount is computed server-side from the user's own cart under RLS, so
+    the client can never dictate what it pays.
+    """
+    try:
+        user_resp = supabase.auth.get_user(token)
+        user = user_resp.user
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    # Scope a client to the caller's JWT so RLS returns only their cart rows.
+    scoped = create_client(SUPABASE_URL, SUPABASE_KEY)
+    scoped.postgrest.auth(token)
+    rows = (
+        scoped.table("cart_items")
+        .select("quantity, products(price)")
+        .execute()
+        .data
+    )
+
+    total = 0.0
+    for row in rows:
+        product = row.get("products") or {}
+        price = float(product.get("price") or 0)
+        total += price * int(row.get("quantity") or 0)
+    return user.id, total
+
+
+@app.post("/create-payment-intent")
+def create_payment_intent(authorization: str | None = Header(default=None)):
+    """Create a Stripe PaymentIntent for the signed-in user's current cart."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe is not configured")
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=401, detail="Missing Authorization bearer token"
+        )
+
+    token = authorization.split(" ", 1)[1].strip()
+    user_id, total = _cart_total_for_token(token)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="Cart is empty")
+
+    amount = int(round(total * 100))  # Stripe expects the smallest currency unit
+    try:
+        intent = stripe.PaymentIntent.create(
+            amount=amount,
+            currency=STRIPE_CURRENCY,
+            automatic_payment_methods={"enabled": True},
+            metadata={"user_id": user_id},
+        )
+    except stripe.StripeError as e:  # noqa: BLE001
+        detail = getattr(e, "user_message", None) or str(e)
+        raise HTTPException(status_code=502, detail=f"Stripe error: {detail}")
+
+    return {
+        "clientSecret": intent.client_secret,
+        "publishableKey": STRIPE_PUBLISHABLE_KEY,
+        "amount": amount,
+        "currency": STRIPE_CURRENCY,
+    }
 
 
 @app.post("/detect")
