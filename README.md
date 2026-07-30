@@ -38,9 +38,39 @@ info (headline, description, star sign, chakras) from Supabase.
    `lib/core/services/api_service.dart` (`_baseUrl`). Phone and computer must
    be on the same Wi-Fi network.
 
+## Subscriptions (7-day trial, then $3.69/month)
+
+1. Run `subscriptions.sql` in the Supabase SQL editor. It creates the
+   `subscriptions` table, starts a 7-day trial on every new signup, and
+   backdates trials for accounts that already exist.
+2. Create the recurring price: `python create_stripe_price.py`. Paste the id it
+   prints into `STRIPE_PRICE_ID` in `.env`.
+3. Copy the **service_role** key from Supabase → Project Settings → API into
+   `SUPABASE_SERVICE_KEY`. It bypasses RLS — backend only, never in the app.
+4. Add a webhook in Stripe → Developers → Webhooks pointing at
+   `https://<your-host>/stripe/webhook`, subscribed to
+   `customer.subscription.*`, `invoice.paid` and `invoice.payment_failed`.
+   Put its signing secret in `STRIPE_WEBHOOK_SECRET`.
+
+The webhook is what grants paid access — the app can only read status, so a
+tampered client can't unlock scanning. While developing, forward events with
+`stripe listen --forward-to localhost:8000/stripe/webhook`.
+
+**App store note:** Apple (3.1.1) and Google both require *in-app purchase* for
+digital content sold inside an app. A Stripe-billed subscription that unlocks an
+app feature will normally be rejected on review — this setup works fine for
+Android sideloads and the web, but plan for StoreKit / Google Play Billing if
+you're shipping to the stores.
+
 ## Endpoints
 
 - `GET /health` — liveness check.
+- `GET /subscription` — trial/subscription status for the signed-in user.
+- `POST /subscription/subscribe` — starts the $3.69/month subscription and
+  returns a `clientSecret` for the payment sheet.
+- `POST /subscription/cancel` — cancels at the end of the paid period.
+- `POST /stripe/webhook` — Stripe → us; the only thing that grants paid access.
+- `POST /orders/{id}/confirmation-email` — emails the buyer their receipt.
 - `POST /detect` — multipart upload with field `file` (jpeg/png). Returns:
 
   ```json
