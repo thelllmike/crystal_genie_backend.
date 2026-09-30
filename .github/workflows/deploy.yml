@@ -51,9 +51,16 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
-          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # Strip Windows line endings / stray spaces that copy-paste can add.
+          printf '%s\n' "$VPS_SSH_KEY" | tr -d '\r' | sed 's/[[:space:]]*$//' > ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1; then
+            echo "::error::VPS_SSH_KEY is not a valid private key. Re-paste the whole key, including the -----BEGIN OPENSSH PRIVATE KEY----- and -----END OPENSSH PRIVATE KEY----- lines (on the Mac: pbcopy < ~/.ssh/crystalgenie_github_deploy)."
+            head -1 ~/.ssh/deploy_key | grep -q 'BEGIN OPENSSH PRIVATE KEY' || echo "::error::The first line should be -----BEGIN OPENSSH PRIVATE KEY-----"
+            tail -1 ~/.ssh/deploy_key | grep -q 'END OPENSSH PRIVATE KEY' || echo "::error::The last line should be -----END OPENSSH PRIVATE KEY-----"
+            exit 1
+          fi
 
       - name: Copy code to the server
         run: |
