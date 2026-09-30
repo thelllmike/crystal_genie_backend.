@@ -61,16 +61,19 @@ jobs:
             tail -1 ~/.ssh/deploy_key | grep -q 'END OPENSSH PRIVATE KEY' || echo "::error::The last line should be -----END OPENSSH PRIVATE KEY-----"
             exit 1
           fi
+          # Safe to print (identifies the key without revealing it). Compare
+          # with: ssh-keygen -lf ~/.ssh/crystalgenie_github_deploy.pub
+          echo "Deploy key fingerprint: $(ssh-keygen -lf ~/.ssh/deploy_key | cut -d' ' -f2)"
 
       - name: Copy code to the server
         run: |
           echo "${GITHUB_SHA::7} ($(git log -1 --format=%s))" > deploy/.last
-          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" \
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key -o BatchMode=yes" \
             --exclude '.git' --exclude '.github' \
             ./ "root@${VPS_HOST}:/opt/crystalgenie/incoming/"
 
       - name: Install and restart (rolls back automatically if unhealthy)
-        run: ssh -i ~/.ssh/deploy_key "root@${VPS_HOST}" 'bash /opt/crystalgenie/incoming/deploy/remote_deploy.sh'
+        run: ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${VPS_HOST}" 'bash /opt/crystalgenie/incoming/deploy/remote_deploy.sh'
 
       - name: Check the public API
         run: |
