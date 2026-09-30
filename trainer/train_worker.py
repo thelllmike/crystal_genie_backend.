@@ -12,6 +12,7 @@
 # It can run on the VPS or on any faster machine — it only needs the .env.
 
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -90,13 +91,14 @@ def claim_next_job(db: Client) -> Job | None:
     return Job(db, claimed[0]) if claimed else None
 
 
-def labeled_images(db: Client) -> list[dict]:
+def fetch_rows(db: Client, column: str) -> list[dict]:
+    """Every photo where `column` (label or boxes) has been filled in."""
     rows, start = [], 0
     while True:
         page = (
             db.table("training_images")
-            .select("id, storage_path, label, stored_on")
-            .not_.is_("label", "null")
+            .select("id, storage_path, label, stored_on, boxes")
+            .not_.is_(column, "null")
             .order("id")
             .range(start, start + 999)
             .execute()
@@ -119,36 +121,19 @@ def is_val(image_id: int) -> bool:
     return hashlib.md5(str(image_id).encode()).digest()[0] % 5 == 0
 
 
-def build_dataset(job: Job) -> tuple[Path, list[str], int]:
-    min_images = int(job.params.get("min_images", 20))
-    by_label: dict[str, list[dict]] = {}
-    for row in labeled_images(job.db):
-        by_label.setdefault(row["label"], []).append(row)
+def split_ids(rows: list[dict]) -> set[int]:
+    """Validation photo ids: ~20%, but never none and never all."""
+    val = {r["id"] for r in rows if is_val(r["id"])}
+    if not val:
+        val = {rows[0]["id"]}
+    if len(val) == len(rows) and len(rows) > 1:
+        val.discard(rows[0]["id"])
+    return val
 
-    classes = sorted(label for label, rows in by_label.items() if len(rows) >= min_images)
-    skipped = sorted(set(by_label) - set(classes))
-    if len(classes) < 2:
-        raise RuntimeError(
-            f"Need at least 2 crystals with {min_images}+ photos each; found {len(classes)}."
-        )
-    job.log(f"{len(classes)} crystals qualify" + (f"; skipping {len(skipped)} with too few photos" if skipped else ""))
 
+def collect_photos(job: Job, tasks: list[tuple[str, str | None, Path]]) -> None:
+    """Copies (or downloads) each (storage_path, stored_on, dest) photo."""
     cache = WORK_DIR / "cache"
-    dataset = WORK_DIR / f"job-{job.id}" / "data"
-    shutil.rmtree(dataset, ignore_errors=True)
-
-    tasks = []
-    for label in classes:
-        rows = by_label[label]
-        val_ids = {r["id"] for r in rows if is_val(r["id"])}
-        if not val_ids:  # every class needs something to be tested on
-            val_ids = {rows[0]["id"]}
-        if len(val_ids) == len(rows):
-            val_ids.discard(rows[0]["id"])
-        for r in rows:
-            split = "val" if r["id"] in val_ids else "train"
-            dest = dataset / split / folder_name(label) / Path(r["storage_path"]).name
-            tasks.append((r["storage_path"], r.get("stored_on"), dest))
 
     def fetch(task):
         path, stored_on, dest = task
@@ -173,33 +158,124 @@ def build_dataset(job: Job) -> tuple[Path, list[str], int]:
     job.log(f"Collecting {len(tasks)} photos…")
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(fetch, tasks))
+
+
+def build_classify_dataset(job: Job) -> tuple[Path, list[str], int]:
+    """ImageFolder layout: data/{train,val}/<crystal>/<photo>."""
+    min_images = int(job.params.get("min_images", 20))
+    by_label: dict[str, list[dict]] = {}
+    for row in fetch_rows(job.db, "label"):
+        by_label.setdefault(row["label"], []).append(row)
+
+    classes = sorted(label for label, rows in by_label.items() if len(rows) >= min_images)
+    skipped = sorted(set(by_label) - set(classes))
+    if len(classes) < 2:
+        raise RuntimeError(f"Need at least 2 crystals with {min_images}+ photos each; found {len(classes)}.")
+    job.log(f"{len(classes)} crystals qualify" + (f"; skipping {len(skipped)} with too few photos" if skipped else ""))
+
+    dataset = WORK_DIR / f"job-{job.id}" / "data"
+    shutil.rmtree(dataset, ignore_errors=True)
+    tasks = []
+    for label in classes:
+        rows = by_label[label]
+        val = split_ids(rows)
+        for r in rows:
+            split = "val" if r["id"] in val else "train"
+            tasks.append((r["storage_path"], r.get("stored_on"), dataset / split / folder_name(label) / Path(r["storage_path"]).name))
+    collect_photos(job, tasks)
     return dataset, classes, len(tasks)
+
+
+def build_detect_dataset(job: Job) -> tuple[Path, list[str], int]:
+    """YOLO detection layout: images/ + labels/ (one .txt of boxes per photo) + data.yaml."""
+    min_images = int(job.params.get("min_images", 20))
+    rows = fetch_rows(job.db, "boxes")
+
+    photos_per_class: dict[str, int] = {}
+    for r in rows:
+        for label in {b["label"] for b in r["boxes"]}:
+            photos_per_class[label] = photos_per_class.get(label, 0) + 1
+    classes = sorted(label for label, n in photos_per_class.items() if n >= min_images)
+    if not classes:
+        raise RuntimeError(f"Need at least 1 crystal boxed in {min_images}+ photos; none qualify yet.")
+    skipped = sorted(set(photos_per_class) - set(classes))
+
+    # A photo with a skipped crystal is left out entirely: keeping it with that
+    # box removed would teach the model the crystal is background.
+    keep = [r for r in rows if all(b["label"] in classes for b in r["boxes"])]
+    empty = sum(1 for r in keep if not r["boxes"])
+    job.log(
+        f"{len(classes)} crystals qualify; {len(keep)} photos ({empty} with no crystals)"
+        + (f"; leaving out {len(rows) - len(keep)} photos containing {len(skipped)} rarer crystals" if skipped else "")
+    )
+
+    dataset = WORK_DIR / f"job-{job.id}" / "data"
+    shutil.rmtree(dataset, ignore_errors=True)
+    index = {label: i for i, label in enumerate(classes)}
+    val = split_ids([r for r in keep if r["boxes"]] or keep)
+    tasks = []
+    for r in keep:
+        split = "val" if r["id"] in val else "train"
+        name = Path(r["storage_path"]).name
+        tasks.append((r["storage_path"], r.get("stored_on"), dataset / "images" / split / name))
+        lines = []
+        for b in r["boxes"]:
+            x, y = max(0.0, b["x"]), max(0.0, b["y"])
+            w, h = min(b["w"], 1 - x), min(b["h"], 1 - y)
+            if w > 0 and h > 0:  # YOLO wants centre x/y + width/height, all 0..1
+                lines.append(f"{index[b['label']]} {x + w / 2:.6f} {y + h / 2:.6f} {w:.6f} {h:.6f}")
+        label_file = dataset / "labels" / split / (Path(name).stem + ".txt")
+        label_file.parent.mkdir(parents=True, exist_ok=True)
+        label_file.write_text("\n".join(lines))
+    collect_photos(job, tasks)
+
+    # JSON is valid YAML, and quotes crystal names with odd characters safely.
+    config = dataset / "data.yaml"
+    config.write_text(
+        json.dumps({"path": str(dataset), "train": "images/train", "val": "images/val", "names": classes})
+    )
+    return config, classes, len(keep)
+
+
+def score(metrics) -> dict[str, float]:
+    """The numbers we report: top1/top5 for classifiers, mAP for detectors."""
+    box = getattr(metrics, "box", None)
+    if box is not None:
+        return {"map50": float(box.map50), "map": float(box.map)}
+    return {"top1": float(getattr(metrics, "top1", 0)), "top5": float(getattr(metrics, "top5", 0))}
+
+
+def describe(s: dict[str, float]) -> str:
+    if "map50" in s:
+        return f"box accuracy (mAP50) {s['map50']:.1%}, strict mAP {s['map']:.1%}"
+    return f"accuracy {s['top1']:.1%} (top-5 {s['top5']:.1%})"
 
 
 def train(job: Job) -> None:
     from ultralytics import YOLO  # slow import; only pay it when there's work
 
-    dataset, classes, count = build_dataset(job)
+    detect = job.params.get("task", "classify") == "detect"
+    data, classes, count = build_detect_dataset(job) if detect else build_classify_dataset(job)
     epochs = int(job.params.get("epochs", 30))
-    imgsz = int(job.params.get("imgsz", 224))
-    base = job.params.get("base_model", "yolo11n-cls.pt")
+    imgsz = int(job.params.get("imgsz", 640 if detect else 224))
+    base = job.params.get("base_model", "yolo11n.pt" if detect else "yolo11n-cls.pt")
     job.update(classes=classes, image_count=count, progress={"epoch": 0, "epochs": epochs})
-    job.log(f"Training {base} for {epochs} epochs at {imgsz}px on {DEVICE}")
+    job.log(f"Training {base} ({'boxes' if detect else 'whole photo'}) for {epochs} epochs at {imgsz}px on {DEVICE}")
 
     model = YOLO(base)
     finished = False  # set once the last epoch has run
 
     def on_epoch_end(trainer):
         nonlocal finished
-        top1 = getattr(trainer.validator.metrics, "top1", None) if trainer.validator else None
+        s = score(trainer.validator.metrics) if trainer.validator else None
         if finished:
             # Ultralytics fires this once more after training, for best.pt.
-            if top1 is not None:
-                job.log(f"Best model accuracy {top1:.1%}")
+            if s:
+                job.log(f"Best model: {describe(s)}")
             return
         epoch = trainer.epoch + 1
         job.update(progress={"epoch": epoch, "epochs": epochs})
-        job.log(f"Epoch {epoch}/{epochs}" + (f" — accuracy {top1:.1%}" if top1 is not None else ""))
+        job.log(f"Epoch {epoch}/{epochs}" + (f" — {describe(s)}" if s else ""))
         if job.canceled():
             job.log("Canceled from the admin panel — stopping after this epoch")
             trainer.stop = True
@@ -207,7 +283,7 @@ def train(job: Job) -> None:
 
     model.add_callback("on_fit_epoch_end", on_epoch_end)
     model.train(
-        data=str(dataset),
+        data=str(data),
         epochs=epochs,
         imgsz=imgsz,
         batch=BATCH,
@@ -225,22 +301,16 @@ def train(job: Job) -> None:
         job.update(finished_at=now())
         return
 
-    metrics = model.metrics
-    top1, top5 = float(getattr(metrics, "top1", 0)), float(getattr(metrics, "top5", 0))
+    result = score(model.metrics)
     best = Path(model.trainer.save_dir) / "weights" / "best.pt"
     remote = f"job-{job.id}/best.pt"
-    job.log(f"Done — accuracy {top1:.1%} (top-5 {top5:.1%}). Uploading model…")
+    job.log(f"Done — {describe(result)}. Uploading model…")
     job.db.storage.from_(MODELS_BUCKET).upload(
         remote, best.read_bytes(), {"content-type": "application/octet-stream", "upsert": "true"}
     )
-    job.update(
-        status="succeeded",
-        metrics={"top1": top1, "top5": top5},
-        model_path=remote,
-        finished_at=now(),
-    )
+    job.update(status="succeeded", metrics=result, model_path=remote, finished_at=now())
     job.log("Model uploaded. Deploy it from the Training page when you're happy with the accuracy.")
-    shutil.rmtree(dataset, ignore_errors=True)  # photos stay in the cache
+    shutil.rmtree(WORK_DIR / f"job-{job.id}", ignore_errors=True)  # photos stay in the cache
 
 
 def main() -> None:

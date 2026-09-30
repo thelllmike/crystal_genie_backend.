@@ -19,6 +19,12 @@ create table if not exists training_images (
 -- 'supabase' = the training-images bucket (photos uploaded before the move).
 alter table training_images add column if not exists stored_on text not null default 'supabase';
 
+-- Boxes drawn around each crystal, for detection training:
+-- [{"label": "Amethyst", "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.25}, ...]
+-- x/y = top-left corner, all values 0..1 of the photo's width/height.
+-- null = not boxed yet; [] = checked, no crystals in the photo.
+alter table training_images add column if not exists boxes jsonb;
+
 create index if not exists training_images_label_idx on training_images (label);
 create index if not exists training_images_unlabeled_idx
   on training_images (created_at) where label is null;
@@ -45,6 +51,16 @@ begin
   return jsonb_build_object(
     'unlabeled', (select count(*) from training_images where label is null),
     'labeled', (select count(*) from training_images where label is not null),
+    'boxed', (select count(*) from training_images where boxes is not null),
+    'unboxed', (select count(*) from training_images where boxes is null),
+    -- per crystal: photos containing it and total boxes, for detection runs
+    'box_classes', coalesce((
+      select jsonb_agg(jsonb_build_object('label', label, 'count', photos, 'boxes', n) order by photos desc, label)
+        from (select b->>'label' as label, count(distinct t.id) as photos, count(*) as n
+                from training_images t, jsonb_array_elements(t.boxes) b
+               where t.boxes is not null
+               group by b->>'label') x
+    ), '[]'::jsonb),
     'classes', coalesce((
       select jsonb_agg(jsonb_build_object('label', label, 'count', n) order by n desc, label)
         from (select label, count(*) as n
@@ -63,11 +79,11 @@ create table if not exists training_jobs (
   id bigint generated always as identity primary key,
   -- queued | running | succeeded | failed | canceled
   status text not null default 'queued',
-  params jsonb not null default '{}'::jsonb,  -- epochs, imgsz, base_model, min_images
+  params jsonb not null default '{}'::jsonb,  -- task (classify|detect), epochs, imgsz, base_model, min_images
   classes text[],                    -- filled in by the trainer
   image_count int,
   progress jsonb,                    -- {"epoch": 3, "epochs": 30}
-  metrics jsonb,                     -- {"top1": 0.93, "top5": 0.99}
+  metrics jsonb,                     -- classify: {"top1","top5"}; detect: {"map50","map"}
   log text,
   error text,
   model_path text,                   -- path inside the models bucket

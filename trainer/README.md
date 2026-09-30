@@ -1,7 +1,14 @@
 # Crystal Genie trainer
 
-Trains a YOLO11 **classification** model from the photos labeled in the admin
-panel (Dataset page) whenever a run is started on the Training page.
+Trains a YOLO11 model from the photos labeled in the admin panel whenever a
+run is started on the Training page. Two kinds, chosen per run:
+
+- **Boxes (detection)** — from the boxes drawn on the Dataset → *Draw boxes*
+  tab. Finds and outlines each crystal, like the original model. Photos marked
+  "no crystals" are used as background. A photo containing a crystal with too
+  few photos to qualify is left out of the run entirely.
+- **Whole photo (classification)** — from the one-label-per-photo *Label* tab.
+  Names the single crystal in the photo; faster to train.
 
 ```
 admin panel ──upload/label──▶ Supabase (training_images + photos)
