@@ -3,3 +3,11 @@
 __pycache__/
 *.pt
 *.onnx
+
+# Training pipeline: downloaded photos, runs, and deployed model weights
+trainer/work/
+models/
+training_data/
+
+# Local training runs (the model is copied to the server as best.pt)
+detect/

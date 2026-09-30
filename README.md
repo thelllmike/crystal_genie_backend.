@@ -13,7 +13,7 @@ info (headline, description, star sign, chakras) from Supabase.
 2. **Install dependencies** (Python 3.10+):
 
    ```bash
-   cd backend
+   cd crystal_genie_backend
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt

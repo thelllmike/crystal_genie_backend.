@@ -49,25 +49,26 @@ The model weights and `.env` are gitignored, so `git clone` alone won't give you
 a working server — copy the directory directly.
 
 ```bash
-cd "/Users/yuvin/Desktop/cristal geine/crystal_genie_frontend"
+cd "/Users/yuvin/Desktop/cristal geine/crystal_genie_backend"
 
-# Backend code (excluding the local venv and caches)
-rsync -av --exclude '.venv' --exclude '__pycache__' \
-  backend/ root@187.127.213.241:/opt/crystalgenie/app/
+# Backend code (excluding the local venv, caches and local training files)
+rsync -av --exclude '.venv' --exclude '__pycache__' --exclude 'detect' \
+  --exclude 'trainer/work' --exclude 'models' --exclude 'training_data' \
+  ./ root@187.127.213.241:/opt/crystalgenie/app/
 
 # The trained YOLO weights — MODEL_PATH=best.pt expects this filename
 rsync -av detect/train/weights/best.pt \
   root@187.127.213.241:/opt/crystalgenie/app/best.pt
 ```
 
-`rsync -av backend/` includes `.env` with your live Stripe secret, the Supabase
+This first copy includes `.env` with your live Stripe secret, the Supabase
 key and the mailbox password. That's intended — the server needs them — but it
 means the transfer is only as safe as your SSH setup. Finish step 10 the same
 day.
 
 ## 4b. Fix `MODEL_PATH` in the server's `.env`
 
-Your local `.env` has `MODEL_PATH=../detect/train/weights/best.pt`, which is
+Your local `.env` has `MODEL_PATH=detect/train/weights/best.pt`, which is
 correct on your Mac but wrong on the server — step 4 copies the weights to
 `/opt/crystalgenie/app/best.pt`, so the relative path resolves to a file that
 isn't there and `main.py` dies at import time (it calls `YOLO(MODEL_PATH)` at
@@ -285,8 +286,10 @@ free -h                                # watch memory during scans
 **Redeploying after a code change** — from your Mac:
 
 ```bash
-rsync -av --exclude '.venv' --exclude '__pycache__' --exclude '.env' \
-  backend/ root@187.127.213.241:/opt/crystalgenie/app/
+cd "/Users/yuvin/Desktop/cristal geine/crystal_genie_backend"
+rsync -av --exclude '.venv' --exclude '__pycache__' --exclude '.env' --exclude 'detect' \
+  --exclude 'trainer/work' --exclude 'models' --exclude 'training_data' \
+  ./ root@187.127.213.241:/opt/crystalgenie/app/
 ssh root@187.127.213.241 'chown -R crystalgenie:crystalgenie /opt/crystalgenie/app && systemctl restart crystalgenie'
 ```
 

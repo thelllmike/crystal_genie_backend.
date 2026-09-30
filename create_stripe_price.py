@@ -2,7 +2,7 @@
 
     python create_stripe_price.py
 
-Prints the price id to paste into STRIPE_PRICE_ID in backend/.env. Re-running
+Prints the price id to paste into STRIPE_PRICE_ID in the backend's .env. Re-running
 reuses the existing product/price instead of creating duplicates — it looks
 them up by the lookup key below.
 

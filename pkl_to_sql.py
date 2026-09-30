@@ -5,7 +5,7 @@ import pickle
 
 import pandas as pd
 
-SRC = "../crystal_descriptions.pkl"
+SRC = "crystal_descriptions.pkl"
 DST = "seed_crystals_full.sql"
 
 

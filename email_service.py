@@ -30,7 +30,7 @@ def is_configured() -> bool:
 def send_email(to: str, subject: str, text_body: str, html_body: str) -> None:
     """Send one message. Raises on failure — callers decide how loud to be."""
     if not is_configured():
-        raise RuntimeError("Email is not configured (set SMTP_* in backend/.env)")
+        raise RuntimeError("Email is not configured (set SMTP_* in the backend's .env)")
 
     msg = EmailMessage()
     msg["From"] = formataddr((MAIL_FROM_NAME, MAIL_FROM))

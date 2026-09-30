@@ -8,20 +8,25 @@ import os
 import stripe
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from supabase import Client, create_client
-from ultralytics import YOLO
 
 load_dotenv()
 
 # Both need the .env values loaded first.
 import email_service  # noqa: E402
+import model_manager  # noqa: E402
+import training_api  # noqa: E402
 import subscription_service  # noqa: E402
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")
 CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.25"))
+# Classifiers always name *something*, so they need a stricter bar than boxes.
+CLS_CONF_THRESHOLD = float(os.getenv("CLS_CONF_THRESHOLD", "0.5"))
+# Label for non-crystal photos; winning it means "nothing found".
+NOT_A_CRYSTAL = "not a crystal"
 
 # Stripe. Kept optional so detection still runs without payment configured.
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
@@ -30,7 +35,18 @@ STRIPE_CURRENCY = os.getenv("STRIPE_CURRENCY", "usd")
 stripe.api_key = STRIPE_SECRET_KEY
 
 app = FastAPI(title="Crystal Genie API")
-model = YOLO(MODEL_PATH)
+# The admin panel (Vercel / localhost) calls the training-photo endpoints from
+# the browser. Requests still need an admin's bearer token; this only lets the
+# browser send them.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=os.getenv(
+        "ADMIN_ORIGIN_REGEX", r"https://[a-z0-9-]+\.vercel\.app|http://localhost:\d+"
+    ),
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+model_manager.start()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # class name (lowercase) -> row from the crystals table
@@ -80,7 +96,7 @@ def save_detection(class_name: str, confidence: float) -> None:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": os.path.basename(MODEL_PATH)}
+    return {"status": "ok", "model": model_manager.name()}
 
 
 def _authed(authorization: str | None):
@@ -104,7 +120,13 @@ def _authed(authorization: str | None):
 
     scoped = create_client(SUPABASE_URL, SUPABASE_KEY)
     scoped.postgrest.auth(token)
+    # Storage reads these headers when first used; without this it would act
+    # as the anonymous role instead of the signed-in user.
+    scoped.options.headers["Authorization"] = f"Bearer {token}"
     return user, scoped
+
+
+app.include_router(training_api.build_router(_authed))
 
 
 def _cart_total(scoped: Client) -> float:
@@ -302,6 +324,13 @@ async def detect(file: UploadFile = File(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="File is not a valid image")
 
+    model = model_manager.get()
+    if model.task == "classify":
+        detections = _classify(model, image)
+        if detections:
+            save_detection(detections[0]["class_name"], detections[0]["confidence"])
+        return {"detections": detections}
+
     results = model.predict(image, conf=CONF_THRESHOLD, verbose=False)
 
     detections = []
@@ -325,3 +354,29 @@ async def detect(file: UploadFile = File(...)):
         save_detection(detections[0]["class_name"], detections[0]["confidence"])
 
     return {"detections": detections}
+
+
+def _classify(model, image: Image.Image) -> list[dict]:
+    """Top guesses from a classification model, shaped like detections.
+
+    The app expects boxes, so each guess gets one covering the whole photo.
+    """
+    probs = model.predict(image, verbose=False)[0].probs
+    width, height = image.size
+    out = []
+    for class_id, confidence in zip(probs.top5, probs.top5conf.tolist()):
+        if confidence < CLS_CONF_THRESHOLD or len(out) == 3:
+            break
+        class_name = model.names[int(class_id)]
+        if class_name.strip().lower() == NOT_A_CRYSTAL:
+            break  # the model is confident this isn't a crystal at all
+        out.append(
+            {
+                "class_id": int(class_id),
+                "class_name": class_name,
+                "confidence": float(confidence),
+                "box": {"x1": 0.0, "y1": 0.0, "x2": float(width), "y2": float(height)},
+                "description": get_crystal_info(class_name),
+            }
+        )
+    return out
