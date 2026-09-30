@@ -1,0 +1,71 @@
+# CI/CD: every push to main is checked, then deployed to the VPS.
+# Setup (secrets, SSH key) is described in deploy/README.md.
+name: Check & deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Never run two deploys at once; a newer push waits for the current one.
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+env:
+  VPS_HOST: 187.127.213.241
+  PUBLIC_URL: https://srv1866657.hstgr.cloud
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # same as the VPS
+      - name: Lint (undefined names, unused imports, syntax errors)
+        run: |
+          pip install ruff
+          ruff check --select F,E9 .
+      - name: Compile every Python file
+        run: python -m compileall -q .
+      - name: Check the deploy script
+        run: bash -n deploy/remote_deploy.sh
+
+  deploy:
+    needs: check
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$VPS_SSH_KEY" ] || [ -z "$VPS_KNOWN_HOSTS" ]; then
+            echo "::error::Add the VPS_SSH_KEY and VPS_KNOWN_HOSTS secrets (see deploy/README.md)"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+
+      - name: Copy code to the server
+        run: |
+          echo "${GITHUB_SHA::7} ($(git log -1 --format=%s))" > deploy/.last
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude '.git' --exclude '.github' \
+            ./ "root@${VPS_HOST}:/opt/crystalgenie/incoming/"
+
+      - name: Install and restart (rolls back automatically if unhealthy)
+        run: ssh -i ~/.ssh/deploy_key "root@${VPS_HOST}" 'bash /opt/crystalgenie/incoming/deploy/remote_deploy.sh'
+
+      - name: Check the public API
+        run: |
+          curl -sf --retry 5 --retry-delay 3 "${PUBLIC_URL}/health"
+          echo

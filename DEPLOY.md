@@ -283,7 +283,7 @@ systemctl restart crystalgenie         # after an .env change
 free -h                                # watch memory during scans
 ```
 
-**Redeploying after a code change** — from your Mac:
+**Redeploying after a code change** — normally just push to `main`; GitHub Actions deploys it (see `deploy/README.md`). Manual fallback, from your Mac:
 
 ```bash
 cd "/Users/yuvin/Desktop/cristal geine/crystal_genie_backend"

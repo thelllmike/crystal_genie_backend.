@@ -11,3 +11,6 @@ training_data/
 
 # Local training runs (the model is copied to the server as best.pt)
 detect/
+
+# Written by CI on each deploy
+deploy/.last
