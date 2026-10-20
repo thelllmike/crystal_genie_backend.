@@ -6,3 +6,4 @@ pillow
 supabase
 python-dotenv
 stripe
+app-store-server-library
