@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
+from pydantic import BaseModel
 from supabase import Client, create_client
 
 load_dotenv()
@@ -19,6 +20,7 @@ import email_service  # noqa: E402
 import model_manager  # noqa: E402
 import training_api  # noqa: E402
 import subscription_service  # noqa: E402
+import apple_iap  # noqa: E402
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
@@ -228,6 +230,42 @@ def cancel_subscription(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=502, detail=f"Stripe error: {detail}")
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class ApplePurchase(BaseModel):
+    transactionId: str
+
+
+@app.post("/subscription/apple/verify")
+def verify_apple_purchase(
+    body: ApplePurchase, authorization: str | None = Header(default=None)
+):
+    """The iPhone app bought or restored a subscription through Apple; check
+    it with the App Store and grant access if it's real."""
+    if not apple_iap.is_configured() or not subscription_service.SUPABASE_SERVICE_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Apple subscriptions are not configured "
+            "(need APPLE_IAP_* , APPLE_APP_ID and SUPABASE_SERVICE_KEY)",
+        )
+    user, _ = _authed(authorization)
+    try:
+        row = apple_iap.verify_purchase(user.id, body.transactionId)
+    except apple_iap.AppleIAPError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return subscription_service.status_payload(row)
+
+
+@app.post("/apple/notifications")
+async def apple_notifications(request: Request):
+    """App Store Server Notifications V2 (set this URL in App Store Connect →
+    App Information). Keeps renewals, refunds and cancellations in sync."""
+    body = await request.json()
+    try:
+        apple_iap.handle_notification(body.get("signedPayload", ""))
+    except apple_iap.AppleIAPError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"received": True}
 
 
 @app.post("/stripe/webhook")

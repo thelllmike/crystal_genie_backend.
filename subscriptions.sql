@@ -1,4 +1,5 @@
--- Crystal Genie subscriptions: 7-day free trial, then $3.69/month.
+-- Crystal Genie subscriptions: 7-day free trial, then $3.69/month
+-- (Stripe on Android, Apple In-App Purchase on iPhone).
 -- Run once in the Supabase SQL editor. Safe to re-run.
 
 create table if not exists subscriptions (
@@ -17,6 +18,13 @@ create index if not exists subscriptions_stripe_customer_idx
   on subscriptions (stripe_customer_id);
 create index if not exists subscriptions_stripe_subscription_idx
   on subscriptions (stripe_subscription_id);
+
+-- Subscriptions bought on iPhone through Apple In-App Purchase (apple_iap.py).
+-- One Apple subscription may only ever unlock one account.
+alter table subscriptions
+  add column if not exists apple_original_transaction_id text;
+create unique index if not exists subscriptions_apple_original_txn_idx
+  on subscriptions (apple_original_transaction_id);
 
 -- Users may read their own row and nothing else. Every write goes through the
 -- backend's service-role key (Stripe is the source of truth for paid status,

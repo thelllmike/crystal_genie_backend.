@@ -120,7 +120,20 @@ def status_payload(row: dict) -> dict:
         "currentPeriodEnd": row.get("current_period_end"),
         "cancelAtPeriodEnd": bool(row.get("cancel_at_period_end")),
         "priceLabel": PRICE_LABEL,
+        # Where the subscription was bought, so the app sends the user to the
+        # right place to manage it (Apple's settings vs. our cancel endpoint).
+        "store": _store(row),
     }
+
+
+def _store(row: dict) -> str | None:
+    if row.get("status") not in ("active", "past_due", "canceled"):
+        return None
+    if row.get("apple_original_transaction_id"):
+        return "apple"
+    if row.get("stripe_subscription_id"):
+        return "stripe"
+    return None
 
 
 def _ensure_customer(user, row: dict) -> str:
